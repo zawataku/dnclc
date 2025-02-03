@@ -1,4 +1,16 @@
 import sys
+import re
+
+def utf8_to_llvm_escape(s):
+    utf8_bytes = s.encode('utf-8')
+    escaped = ''.join([f'\\{b:02X}' for b in utf8_bytes])  # 16進エスケープ変換
+    return escaped + '\\0A\\00', len(utf8_bytes) + 2  # 改行 + 終端文字
+
+def extract_string_literal(s):
+    match = re.match(r'^(「.*」|".*")$', s)
+    if match:
+        return s[1:-1]  # 「」「」 または """" を削除
+    return None
 
 def compile_dncl_to_llvm(dncl_code):
     llvm_code = """
@@ -9,7 +21,7 @@ entry:
 """
     variables = {}
     string_constants = {}
-    string_counter = 0  # 文字列定義用のカウンタ
+    string_counter = 0  
 
     lines = dncl_code.split("\n")
     for line in lines:
@@ -31,19 +43,22 @@ entry:
                 if tok in variables:  # 変数の場合
                     llvm_code += f"  %{tok}_val = load i32, i32* %{tok}, align 4\n"
                     llvm_code += f"  call i32 (i8*, ...) @printf(i8* getelementptr ([4 x i8], [4 x i8]* @.int_format, i32 0, i32 0), i32 %{tok}_val)\n"
-                elif tok.startswith("「") and tok.endswith("」"):  # 文字列リテラルの場合
-                    clean_str = tok[1:-1]  # 「」 を削除
-                    utf8_bytes = clean_str.encode('utf-8')  # UTF-8 のバイト列
-                    byte_len = len(utf8_bytes) + 2  # 改行 `\0A` + 終端 `\00`
-                    str_var = f"@.str{string_counter}"
-                    string_constants[str_var] = utf8_bytes.decode('utf-8')  # Python 文字列に戻す
-                    llvm_code += f"  call i32 (i8*, ...) @printf(i8* getelementptr ([{byte_len} x i8], [{byte_len} x i8]* {str_var}, i32 0, i32 0))\n"
-                    string_counter += 1
+                else:
+                    extracted_str = extract_string_literal(tok)
+                    if extracted_str is not None:  # 文字列リテラルの場合
+                        llvm_escaped_str, byte_len = utf8_to_llvm_escape(extracted_str)  # UTF-8 のバイト列取得
+                        str_var = f"@.str{string_counter}"
+                        string_constants[str_var] = (llvm_escaped_str, byte_len)
+                        llvm_code += f"  call i32 (i8*, ...) @printf(i8* getelementptr ([{byte_len} x i8], [{byte_len} x i8]* {str_var}, i32 0, i32 0))\n"
+                        string_counter += 1
 
     llvm_code += "  ret i32 0\n}\n"
 
     # 文字列定数を上部に追加
-    string_defs = '\n'.join([f'{var} = private unnamed_addr constant [{len(val) + 2} x i8] c"{val}\\0A\\00", align 1' for var, val in string_constants.items()])
+    string_defs = '\n'.join([
+        f'{var} = private unnamed_addr constant [{length} x i8] c"{escaped}", align 1'
+        for var, (escaped, length) in string_constants.items()
+    ])
     llvm_code = string_defs + "\n" + llvm_code
 
     # 数値フォーマット定義
